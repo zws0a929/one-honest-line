@@ -66,7 +66,12 @@ the output file (default ``/output/entry.txt``). Nothing else is
 written. The output is fully deterministic: the line is a constant,
 there is no randomness, no clock, no environment dependence, and the
 write is atomic (temporary file in the same directory, then rename),
-so a reader never sees a half-written file.
+so a reader never sees a half-written file. The output file must end
+up world-readable (mode 0644) so the grader's output collector — which
+runs as a different user — can read it; the temporary file is therefore
+created with a plain ``open`` (umask default 0644) and never with
+``tempfile.mkstemp``, whose 0600 mode would survive the rename and
+make the entry unreadable to the grader.
 
 Before writing, the line is checked against the competition gate:
 1–200 characters, not only whitespace, and no control characters.
@@ -159,19 +164,34 @@ def write_entry(path: str) -> str:
     old content or the complete new content — never a partial write.
     The bytes written are always exactly ``ENTRY_TEXT`` encoded as
     UTF-8, so repeated runs produce byte-identical files.
+
+    The temporary file is created with a plain ``open`` call, not
+    ``tempfile.mkstemp``: ``mkstemp`` creates the file with mode 0600,
+    and the rename carries that mode onto the destination, leaving
+    the output unreadable by anyone but its owner — including the
+    grader's output collector, which runs as a different user. A
+    plain ``open`` creates the file with the process umask (0644),
+    so the renamed output stays world-readable. Because the umask
+    in some environments is restrictive (0007 gives 0660), the
+    temporary file is additionally chmodded to 0644 before the
+    rename, so the mode is guaranteed regardless of umask.
     """
     validate_or_exit(ENTRY_LINE, "entry line")
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
     data = ENTRY_TEXT.encode("utf-8")
-    fd, tmp_path = tempfile.mkstemp(
-        dir=directory, prefix=".entry-", suffix=".tmp"
-    )
+    tmp_path = os.path.join(directory, ".entry.txt.tmp")
     try:
-        with os.fdopen(fd, "wb") as handle:
+        with open(tmp_path, "wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
+        # Force mode 0644 explicitly: a plain open inherits the process
+        # umask (0007 in this environment gives 0660), which is still
+        # unreadable by a collector running as a different user. The
+        # chmod happens before the rename so the destination is born
+        # world-readable.
+        os.chmod(tmp_path, 0o644)
         os.replace(tmp_path, path)
     except BaseException:
         try:
